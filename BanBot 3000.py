@@ -3,9 +3,17 @@ from discord.ext import commands
 from datetime import timedelta
 from discord.utils import utcnow
 from discord import Forbidden
+from dotenv import load_dotenv
+import os
 
-# 🔓 Hardcoded token (REPLACE THIS with your actual bot token)
-DISCORD_TOKEN = "Your Token here"
+# Load environment variables from banbot.env
+load_dotenv(dotenv_path="banbot.env")
+
+# Get the token from the environment
+DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
+
+if not DISCORD_TOKEN:
+    raise ValueError("No DISCORD_TOKEN found in environment variables. Check your banbot.env file!")
 
 # Create the bot with the necessary intents
 intents = discord.Intents.default()
@@ -68,9 +76,7 @@ def create_timeout_command(minutes):
             await ctx.send('🛑 HOLD IT RIGHT THERE, CRIMINAL SCUM. ❌ You don’t have permission to timeout members.')
     return timeout
 
-# Register all timeout commands dynamically for 1 to 60 minutes
 for i in range(1, 61):
     bot.command(name=f'timeout_{i}')(create_timeout_command(i))
 
-# Run the bot
 bot.run(DISCORD_TOKEN)
