@@ -108,22 +108,27 @@ class BanBot3000(commands.Bot):
         self.user_message_times: Dict[int, deque] = defaultdict(lambda: deque(maxlen=10))
 
     def log_command_usage(self, ctx, command_name: str, target_user: Optional[discord.Member] = None, details: str = None):
-        """Log command usage to history"""
+        """Enhanced command usage logging with better victim/executor tracking"""
         entry = {
             "timestamp": datetime.now(timezone.utc),
             "command": command_name,
             "executor": {
                 "id": ctx.author.id,
-                "name": ctx.author.display_name
+                "name": ctx.author.display_name,
+                "username": ctx.author.name  # Add username for better identification
             },
             "channel": ctx.channel.name,
-            "guild": ctx.guild.name if ctx.guild else "DM"
+            "guild": ctx.guild.name if ctx.guild else "DM",
+            "guild_id": ctx.guild.id if ctx.guild else None
         }
         
+        # Enhanced victim/target tracking
         if target_user:
-            entry["affected"] = {
+            entry["victim"] = {
                 "id": target_user.id,
-                "name": target_user.display_name
+                "name": target_user.display_name,
+                "username": target_user.name,
+                "mention": target_user.mention
             }
         
         if details:
@@ -389,7 +394,7 @@ async def help_command(ctx):
         value="""
 `botstats` - Show bot statistics
 `botwarnings @user` - Show user warnings
-`bothistory [@user]` - Show command history
+`bothistory [@user]` - Show detailed command history
 `botdeopped` - Show deopped users
 `botmemory` - Show memory usage stats
 `botperms` - Check bot permissions
@@ -548,11 +553,12 @@ async def ban(ctx, member: discord.Member, *, reason: str = "No reason provided"
 
         embed = discord.Embed(
             title="🔨 User Banned",
-            description=f"{member.mention} has been banned.",
+            description=f"**{member.display_name}** ({member.mention}) has been banned.",
             color=discord.Color.red()
         )
-        embed.add_field(name="Reason", value=reason, inline=False)
-        embed.add_field(name="Moderator", value=ctx.author.mention, inline=True)
+        embed.add_field(name="👤 Victim", value=f"{member.display_name} ({member.name})", inline=True)
+        embed.add_field(name="⚖️ Executor", value=f"{ctx.author.display_name} ({ctx.author.name})", inline=True)
+        embed.add_field(name="📝 Reason", value=reason, inline=False)
         embed.timestamp = datetime.now(timezone.utc)
 
         await ctx.send(embed=embed)
@@ -616,11 +622,12 @@ async def kick(ctx, member: discord.Member, *, reason: str = "No reason provided
 
         embed = discord.Embed(
             title="👢 User Kicked",
-            description=f"{member.mention} has been kicked.",
+            description=f"**{member.display_name}** ({member.mention}) has been kicked.",
             color=discord.Color.orange()
         )
-        embed.add_field(name="Reason", value=reason, inline=False)
-        embed.add_field(name="Moderator", value=ctx.author.mention, inline=True)
+        embed.add_field(name="👤 Victim", value=f"{member.display_name} ({member.name})", inline=True)
+        embed.add_field(name="⚖️ Executor", value=f"{ctx.author.display_name} ({ctx.author.name})", inline=True)
+        embed.add_field(name="📝 Reason", value=reason, inline=False)
         embed.timestamp = datetime.now(timezone.utc)
 
         await ctx.send(embed=embed)
@@ -708,12 +715,13 @@ async def timeout(ctx, member: discord.Member, duration: str, *, reason: str = "
 
         embed = discord.Embed(
             title="🤐 User Timed Out",
-            description=f"{member.mention} has been timed out for {duration}.",
+            description=f"**{member.display_name}** ({member.mention}) has been timed out for {duration}.",
             color=discord.Color.orange()
         )
-        embed.add_field(name="Duration", value=duration, inline=True)
-        embed.add_field(name="Reason", value=reason, inline=False)
-        embed.add_field(name="Moderator", value=ctx.author.mention, inline=True)
+        embed.add_field(name="👤 Victim", value=f"{member.display_name} ({member.name})", inline=True)
+        embed.add_field(name="⚖️ Executor", value=f"{ctx.author.display_name} ({ctx.author.name})", inline=True)
+        embed.add_field(name="⏰ Duration", value=duration, inline=True)
+        embed.add_field(name="📝 Reason", value=reason, inline=False)
         embed.timestamp = datetime.now(timezone.utc)
 
         await ctx.send(embed=embed)
@@ -777,13 +785,14 @@ async def warn(ctx, member: discord.Member, *, reason: str = "No reason provided
 
         embed = discord.Embed(
             title="⚠️ User Warned",
-            description=f"{member.mention} has been warned.",
+            description=f"**{member.display_name}** ({member.mention}) has been warned.",
             color=discord.Color.yellow()
         )
-        embed.add_field(name="Warning ID", value=f"#{warning.id}", inline=True)
-        embed.add_field(name="Total Warnings", value=warning_count, inline=True)
-        embed.add_field(name="Reason", value=reason, inline=False)
-        embed.add_field(name="Moderator", value=ctx.author.mention, inline=True)
+        embed.add_field(name="👤 Victim", value=f"{member.display_name} ({member.name})", inline=True)
+        embed.add_field(name="⚖️ Executor", value=f"{ctx.author.display_name} ({ctx.author.name})", inline=True)
+        embed.add_field(name="🆔 Warning ID", value=f"#{warning.id}", inline=True)
+        embed.add_field(name="📊 Total Warnings", value=warning_count, inline=True)
+        embed.add_field(name="📝 Reason", value=reason, inline=False)
         embed.timestamp = datetime.now(timezone.utc)
 
         await ctx.send(embed=embed)
@@ -830,7 +839,7 @@ async def warnings(ctx, member: discord.Member = None):
 
 @bot.command()
 async def history(ctx, member: discord.Member = None, limit: int = 10):
-    """Shows the bot command history"""
+    """Shows the enhanced bot command history with executor and victim details"""
     bot.log_command_usage(ctx, "history", member)
     
     if not bot.is_authorized(ctx, "warn"):  # Using warn permission level for viewing history
@@ -850,12 +859,12 @@ async def history(ctx, member: discord.Member = None, limit: int = 10):
         filtered_history = [
             entry for entry in bot.command_history 
             if (entry["executor"]["id"] == member.id or 
-                (entry.get("affected") and entry["affected"]["id"] == member.id))
+                (entry.get("victim") and entry["victim"]["id"] == member.id))
         ]
-        title = f"🤖 Command History for {member.display_name}"
+        title = f"📋 Command History for {member.display_name}"
     else:
         filtered_history = bot.command_history
-        title = "🤖 Bot Command History"
+        title = "📋 Bot Command History"
     
     if not filtered_history:
         embed = discord.Embed(
@@ -877,19 +886,44 @@ async def history(ctx, member: discord.Member = None, limit: int = 10):
     
     for i, entry in enumerate(reversed(recent_history), 1):
         timestamp = entry["timestamp"].strftime("%Y-%m-%d %H:%M:%S UTC")
-        executor = entry["executor"]["name"]
+        executor_name = entry["executor"]["name"]
+        executor_username = entry["executor"]["username"]
         command = entry["command"]
         
-        field_value = f"**Executor:** {executor}\n**Time:** {timestamp}\n**Channel:** {entry['channel']}"
+        # Build the field value with enhanced information
+        field_value = f"**⚖️ Executor:** {executor_name} (@{executor_username})\n"
+        field_value += f"**⏰ Time:** {timestamp}\n"
+        field_value += f"**📍 Channel:** {entry['channel']}\n"
         
-        if entry.get("affected"):
-            field_value += f"\n**Affected:** {entry['affected']['name']}"
+        # Add victim information if available
+        if entry.get("victim"):
+            victim_name = entry["victim"]["name"]
+            victim_username = entry["victim"]["username"]
+            field_value += f"**👤 Victim:** {victim_name} (@{victim_username})\n"
         
+        # Add details if available
         if entry.get("details"):
-            field_value += f"\n**Details:** {entry['details']}"
+            details = entry["details"]
+            # Truncate details if too long
+            if len(details) > 100:
+                details = details[:100] + "..."
+            field_value += f"**📝 Details:** {details}\n"
+        
+        # Add command icon based on type
+        command_icons = {
+            "ban": "🔨",
+            "kick": "👢", 
+            "timeout": "🤐",
+            "warn": "⚠️",
+            "deop": "🚫",
+            "reop": "✅",
+            "cleanup": "🧹"
+        }
+        
+        icon = command_icons.get(command, "🤖")
         
         embed.add_field(
-            name=f"{i}. bot{command}",
+            name=f"{i}. {icon} bot{command}",
             value=field_value,
             inline=False
         )
@@ -1114,11 +1148,12 @@ async def deop(ctx, member: discord.Member, *, reason: str = "No reason provided
 
     embed = discord.Embed(
         title="🚫 User Deopped",
-        description=f"{member.mention} has been removed from admin privileges.",
+        description=f"**{member.display_name}** ({member.mention}) has been removed from admin privileges.",
         color=discord.Color.red()
     )
-    embed.add_field(name="Reason", value=reason, inline=False)
-    embed.add_field(name="Admin", value=ctx.author.mention, inline=True)
+    embed.add_field(name="👤 Victim", value=f"{member.display_name} ({member.name})", inline=True)
+    embed.add_field(name="⚖️ Executor", value=f"{ctx.author.display_name} ({ctx.author.name})", inline=True)
+    embed.add_field(name="📝 Reason", value=reason, inline=False)
     embed.timestamp = datetime.now(timezone.utc)
 
     await ctx.send(embed=embed)
@@ -1152,10 +1187,11 @@ async def reop(ctx, member: discord.Member):
 
     embed = discord.Embed(
         title="✅ User Reopped",
-        description=f"{member.mention} has had their admin privileges restored.",
+        description=f"**{member.display_name}** ({member.mention}) has had their admin privileges restored.",
         color=discord.Color.green()
     )
-    embed.add_field(name="Admin", value=ctx.author.mention, inline=True)
+    embed.add_field(name="👤 Victim", value=f"{member.display_name} ({member.name})", inline=True)
+    embed.add_field(name="⚖️ Executor", value=f"{ctx.author.display_name} ({ctx.author.name})", inline=True)
     embed.timestamp = datetime.now(timezone.utc)
 
     await ctx.send(embed=embed)
@@ -1223,7 +1259,7 @@ async def cleanup(ctx, amount: int = 10):
         
         embed = discord.Embed(
             title="🧹 Messages Cleaned",
-            description=f"Deleted {len(deleted) - 1} messages.",
+            description=f"Deleted {len(deleted) - 1} messages by **{ctx.author.display_name}**.",
             color=discord.Color.green()
         )
         
