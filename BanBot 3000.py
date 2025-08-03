@@ -952,7 +952,8 @@ async def on_command_error(ctx, error):
         logger.error(f"Unexpected error in command {ctx.command}: {error}")
         await bot.report_error(ctx, traceback.format_exc())
         await ctx.send("❌ An unexpected error occurred.")
-
+from keep_alive import keep_alive
+keep_alive()
 # Run the bot
 if __name__ == "__main__":
     #TOKEN HERE!!!
