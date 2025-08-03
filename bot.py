@@ -12,6 +12,7 @@ from typing import Optional, Union, Dict, List
 from dataclasses import dataclass
 from enum import Enum
 from collections import defaultdict, deque
+
 # Setup logging
 logging.basicConfig(
     level=logging.INFO,
@@ -107,8 +108,9 @@ class BanBot3000(commands.Bot):
 
     def is_admin(self, user: Union[discord.Member, discord.User]) -> bool:
         """Check if user is admin"""
-        return (user.name.lower() in [name.lower() for name in self.config["admin_users"]] or 
-                (hasattr(user, 'guild') and user == user.guild.owner))
+        is_named_admin = user.name.lower() in [name.lower() for name in self.config["admin_users"]]
+        is_guild_owner = isinstance(user, discord.Member) and user == user.guild.owner
+        return is_named_admin or is_guild_owner
 
     def is_deopped(self, user_id: int) -> bool:
         """Check if user is deopped"""
@@ -144,7 +146,9 @@ class BanBot3000(commands.Bot):
             return False
 
         # Then check if they have permission for the specific action
-        return self.has_permission_for_action(ctx.author, action)
+        if isinstance(ctx.author, discord.Member):
+            return self.has_permission_for_action(ctx.author, action)
+        return False
 
     def log_action(self, action: ModerationAction):
         """Log moderation action to memory"""
@@ -196,7 +200,7 @@ class BanBot3000(commands.Bot):
                 else:
                     channel = ctx_or_channel
 
-            if channel:
+            if channel and hasattr(channel, 'send'):
                 if len(error_text) > 1900:
                     error_text = error_text[:1900] + "\n[Truncated...]"
 
@@ -212,11 +216,14 @@ class BanBot3000(commands.Bot):
 
     async def check_permissions(self, guild: discord.Guild) -> Dict[str, bool]:
         """Check if bot has required permissions"""
+        if not self.user:
+            return {}
         bot_member = guild.get_member(self.user.id)
         if not bot_member:
             return {}
 
         permissions = bot_member.guild_permissions
+
         return {
             "ban_members": permissions.ban_members,
             "kick_members": permissions.kick_members,
@@ -245,9 +252,78 @@ class BanBot3000(commands.Bot):
                     del self.user_message_times[user_id]
 
             logger.info(f"Cleanup completed. Tracking {len(self.user_message_times)} users.")
-
         except Exception as e:
             logger.error(f"Cleanup task error: {e}")
+
+    async def on_ready(self):
+        """Bot ready event"""
+        logger.info(f'{self.user} has connected to Discord!')
+        logger.info(f'Bot is in {len(self.guilds)} guilds')
+        
+        # Start cleanup task
+        if not self.cleanup_task.is_running():
+            self.cleanup_task.start()
+
+        # Set bot status
+        await self.change_presence(
+            activity=discord.Activity(
+                type=discord.ActivityType.watching,
+                name="for rule violations | bothelp"
+            ),
+            status=discord.Status.online
+        )
+
+    async def on_command_error(self, ctx, error):
+        """Global error handler"""
+        self.stats["commands_used"] += 1
+
+        if isinstance(error, commands.CommandNotFound):
+            return  # Ignore command not found errors
+
+        elif isinstance(error, commands.MissingPermissions):
+            embed = discord.Embed(
+                title="❌ Missing Permissions",
+                description=f"You don't have permission to use this command.\nRequired: {', '.join(error.missing_permissions)}",
+                color=discord.Color.red()
+            )
+            await ctx.send(embed=embed)
+
+        elif isinstance(error, commands.BotMissingPermissions):
+            embed = discord.Embed(
+                title="❌ Bot Missing Permissions", 
+                description=f"I don't have permission to do that.\nRequired: {', '.join(error.missing_permissions)}",
+                color=discord.Color.red()
+            )
+            await ctx.send(embed=embed)
+
+        elif isinstance(error, commands.MemberNotFound):
+            embed = discord.Embed(
+                title="❌ Member Not Found",
+                description="Could not find that member. Make sure you mention them correctly.",
+                color=discord.Color.red()
+            )
+            await ctx.send(embed=embed)
+
+        elif isinstance(error, commands.BadArgument):
+            embed = discord.Embed(
+                title="❌ Invalid Argument",
+                description=f"Invalid argument provided: {str(error)}",
+                color=discord.Color.red()
+            )
+            await ctx.send(embed=embed)
+
+        else:
+            # Log unexpected errors
+            error_text = f"Command: {ctx.command}\nError: {str(error)}\nTraceback: {traceback.format_exc()}"
+            logger.error(error_text)
+            await self.report_error(ctx, error_text)
+
+            embed = discord.Embed(
+                title="❌ Unexpected Error",
+                description="An unexpected error occurred. The error has been logged.",
+                color=discord.Color.red()
+            )
+            await ctx.send(embed=embed)
 
 # Create bot instance
 bot = BanBot3000()
@@ -266,28 +342,28 @@ async def help_command(ctx):
     embed.add_field(
         name="👑 Moderation Commands",
         value="""
-        `botban @user [reason]` - Ban a user (Requires Ban Members permission)
-        `botkick @user [reason]` - Kick a user (Requires Kick Members permission)
-        `bottimeout @user <duration> [reason]` - Timeout a user (Requires Timeout Members permission)
-        `bottimeout(Xm/h/d) @user` - Legacy timeout format
-        `botwarn @user [reason]` - Warn a user (Requires Manage Messages/Kick/Ban permission)
-        `botdeop @user [reason]` - Remove admin privileges (Admin only)
-        `botreop @user` - Restore admin privileges (Admin only)
-        """,
+`botban @user [reason]` - Ban a user (Requires Ban Members permission)
+`botkick @user [reason]` - Kick a user (Requires Kick Members permission)
+`bottimeout @user <duration> [reason]` - Timeout a user (Requires Timeout Members permission)
+`bottimeout(Xm/h/d) @user` - Legacy timeout format
+`botwarn @user [reason]` - Warn a user (Requires Manage Messages/Kick/Ban permission)
+`botdeop @user [reason]` - Remove admin privileges (Admin only)
+`botreop @user` - Restore admin privileges (Admin only)
+""",
         inline=False
     )
 
     embed.add_field(
-        name="📊 Info Commands", 
+        name="📊 Info Commands",
         value="""
-        `botstats` - Show bot statistics
-        `botwarnings @user` - Show user warnings
-        `bothistory @user` - Show moderation history
-        `botdeopped` - Show deopped users
-        `botmemory` - Show memory usage stats
-        `botperms` - Check bot permissions
-        `botuserperms @user` - Check user permissions
-        """,
+`botstats` - Show bot statistics
+`botwarnings @user` - Show user warnings
+`bothistory @user` - Show moderation history
+`botdeopped` - Show deopped users
+`botmemory` - Show memory usage stats
+`botperms` - Check bot permissions
+`botuserperms @user` - Check user permissions
+""",
         inline=False
     )
 
@@ -314,7 +390,6 @@ async def ping(ctx):
 async def perms(ctx):
     """Check bot permissions"""
     perms = await bot.check_permissions(ctx.guild)
-
     embed = discord.Embed(
         title="🔐 Bot Permissions",
         color=discord.Color.blue()
@@ -341,7 +416,11 @@ async def perms(ctx):
 async def userperms(ctx, member: discord.Member = None):
     """Check user permissions for moderation commands"""
     if member is None:
-        member = ctx.author
+        if isinstance(ctx.author, discord.Member):
+            member = ctx.author
+        else:
+            await ctx.send("This command can only be used in a server.")
+            return
 
     embed = discord.Embed(
         title=f"🔐 {member.display_name}'s Moderation Permissions",
@@ -366,7 +445,7 @@ async def userperms(ctx, member: discord.Member = None):
     )
 
     embed.add_field(
-        name="🚫 Deop Status", 
+        name="🚫 Deop Status",
         value="❌ Deopped" if is_deopped else "✅ Active",
         inline=True
     )
@@ -376,86 +455,45 @@ async def userperms(ctx, member: discord.Member = None):
     for perm_name, (action, has_perm) in permissions_check.items():
         can_use = bot.has_permission_for_action(member, action) and not is_deopped
         status = "✅" if can_use else "❌"
-
         embed.add_field(
             name=f"{status} {perm_name}",
-            value=f"Can use bot{action} commands" if can_use else "Cannot use",
+            value=f"Can use bot{action} commands" if can_use else "Cannot use command",
             inline=True
         )
 
     await ctx.send(embed=embed)
 
 @bot.command()
-async def uptime(ctx):
-    """Show bot uptime"""
-    now = datetime.now(timezone.utc)
-    uptime = now - bot.stats["uptime_start"]
-
-    days = uptime.days
-    hours, remainder = divmod(uptime.seconds, 3600)
-    minutes, seconds = divmod(remainder, 60)
-
-    embed = discord.Embed(
-        title="⏰ Bot Uptime",
-        description=f"**Uptime:** {days}d {hours}h {minutes}m {seconds}s",
-        color=discord.Color.blue(),
-        timestamp=now
-    )
-    await ctx.send(embed=embed)
-
-@bot.command()
-async def memory(ctx):
-    """Show memory usage statistics"""
-    embed = discord.Embed(
-        title="🧠 Memory Usage Statistics",
-        color=discord.Color.purple(),
-        timestamp=datetime.now(timezone.utc)
-    )
-
-    embed.add_field(name="📋 Moderation Actions", value=len(bot.moderation_actions), inline=True)
-    embed.add_field(name="⚠️ Warnings", value=len(bot.warnings), inline=True)
-    embed.add_field(name="🚫 Deopped Users", value=len(bot.deopped_users), inline=True)
-    embed.add_field(name="💬 Processed Messages", value=len(bot.processed_messages), inline=True)
-    embed.add_field(name="👥 Tracked Users", value=len(bot.user_message_times), inline=True)
-    embed.add_field(name="🆔 Next Warning ID", value=bot.next_warning_id - 1, inline=True)
-
-    await ctx.send(embed=embed)
-
-@bot.command()
-async def stats(ctx):
-    """Show bot statistics"""
-    embed = discord.Embed(
-        title="📊 BanBot 3000 Statistics",
-        color=discord.Color.blue(),
-        timestamp=datetime.now(timezone.utc)
-    )
-
-    embed.add_field(name="🔨 Bans", value=bot.stats.get("bans", 0), inline=True)
-    embed.add_field(name="👢 Kicks", value=bot.stats.get("kicks", 0), inline=True)
-    embed.add_field(name="⏰ Timeouts", value=bot.stats.get("timeouts", 0), inline=True)
-    embed.add_field(name="⚠️ Warnings", value=bot.stats.get("warnings", 0), inline=True)
-    embed.add_field(name="🚫 Deops", value=bot.stats.get("deops", 0), inline=True)
-    embed.add_field(name="💬 Commands Used", value=bot.stats.get("commands_used", 0), inline=True)
-
-    # Calculate uptime
-    uptime = datetime.now(timezone.utc) - bot.stats["uptime_start"]
-    uptime_str = f"{uptime.days}d {uptime.seconds//3600}h {(uptime.seconds//60)%60}m"
-    embed.add_field(name="⏰ Uptime", value=uptime_str, inline=True)
-
-    await ctx.send(embed=embed)
-
-@bot.command()
-async def ban(ctx, member: discord.Member, *, reason="No reason provided"):
-    """Ban a user with enhanced logging"""
+async def ban(ctx, member: discord.Member, *, reason: str = "No reason provided"):
+    """Ban a user from the server"""
     if not bot.is_authorized(ctx, "ban"):
-        return await ctx.send("❌ You don't have permission to ban members.")
+        embed = discord.Embed(
+            title="❌ Access Denied",
+            description="You don't have permission to ban members or you've been deopped.",
+            color=discord.Color.red()
+        )
+        await ctx.send(embed=embed)
+        return
+
+    if member == ctx.author:
+        embed = discord.Embed(
+            title="❌ Invalid Target",
+            description="You cannot ban yourself!",
+            color=discord.Color.red()
+        )
+        await ctx.send(embed=embed)
+        return
+
+    if member.top_role >= ctx.author.top_role and not bot.is_admin(ctx.author):
+        embed = discord.Embed(
+            title="❌ Insufficient Hierarchy",
+            description="You cannot ban someone with a higher or equal role!",
+            color=discord.Color.red()
+        )
+        await ctx.send(embed=embed)
+        return
 
     try:
-        # Check bot permissions
-        perms = await bot.check_permissions(ctx.guild)
-        if not perms.get("ban_members", False):
-            return await ctx.send("❌ I don't have permission to ban members!")
-
         # Log the action
         action = ModerationAction(
             user_id=member.id,
@@ -466,45 +504,63 @@ async def ban(ctx, member: discord.Member, *, reason="No reason provided"):
         )
         bot.log_action(action)
 
-        # Send DM to user before banning
-        try:
-            embed = discord.Embed(
-                title="🔨 You have been banned",
-                description=f"**Server:** {ctx.guild.name}\n**Reason:** {reason}\n**Moderator:** {ctx.author.mention}",
-                color=discord.Color.red()
-            )
-            await member.send(embed=embed)
-        except:
-            pass  # User has DMs disabled
-
-        await member.ban(reason=f"{reason} | Banned by {ctx.author}")
+        # Ban the member
+        await member.ban(reason=f"Banned by {ctx.author}: {reason}")
 
         embed = discord.Embed(
             title="🔨 User Banned",
-            description=f"**User:** {member.mention} ({member.id})\n**Reason:** {reason}\n**Moderator:** {ctx.author.mention}",
-            color=discord.Color.red(),
-            timestamp=datetime.now(timezone.utc)
+            description=f"{member.mention} has been banned.",
+            color=discord.Color.red()
         )
+        embed.add_field(name="Reason", value=reason, inline=False)
+        embed.add_field(name="Moderator", value=ctx.author.mention, inline=True)
+        embed.timestamp = datetime.now(timezone.utc)
+
         await ctx.send(embed=embed)
+        logger.info(f"User {member} banned by {ctx.author} for: {reason}")
 
     except discord.Forbidden:
-        await ctx.send("❌ I don't have permission to ban this user.")
+        embed = discord.Embed(
+            title="❌ Ban Failed",
+            description="I don't have permission to ban this user.",
+            color=discord.Color.red()
+        )
+        await ctx.send(embed=embed)
     except Exception as e:
-        await bot.report_error(ctx, traceback.format_exc())
-        await ctx.send("❌ An error occurred while banning the user.")
+        await bot.report_error(ctx, f"Ban command error: {str(e)}")
 
 @bot.command()
-async def kick(ctx, member: discord.Member, *, reason="No reason provided"):
-    """Kick a user with enhanced logging"""
+async def kick(ctx, member: discord.Member, *, reason: str = "No reason provided"):
+    """Kick a user from the server"""
     if not bot.is_authorized(ctx, "kick"):
-        return await ctx.send("❌ You don't have permission to kick members.")
+        embed = discord.Embed(
+            title="❌ Access Denied",
+            description="You don't have permission to kick members or you've been deopped.",
+            color=discord.Color.red()
+        )
+        await ctx.send(embed=embed)
+        return
+
+    if member == ctx.author:
+        embed = discord.Embed(
+            title="❌ Invalid Target",
+            description="You cannot kick yourself!",
+            color=discord.Color.red()
+        )
+        await ctx.send(embed=embed)
+        return
+
+    if member.top_role >= ctx.author.top_role and not bot.is_admin(ctx.author):
+        embed = discord.Embed(
+            title="❌ Insufficient Hierarchy",
+            description="You cannot kick someone with a higher or equal role!",
+            color=discord.Color.red()
+        )
+        await ctx.send(embed=embed)
+        return
 
     try:
-        # Check bot permissions
-        perms = await bot.check_permissions(ctx.guild)
-        if not perms.get("kick_members", False):
-            return await ctx.send("❌ I don't have permission to kick members!")
-
+        # Log the action
         action = ModerationAction(
             user_id=member.id,
             moderator_id=ctx.author.id,
@@ -514,481 +570,421 @@ async def kick(ctx, member: discord.Member, *, reason="No reason provided"):
         )
         bot.log_action(action)
 
-        await member.kick(reason=f"{reason} | Kicked by {ctx.author}")
+        # Kick the member
+        await member.kick(reason=f"Kicked by {ctx.author}: {reason}")
 
         embed = discord.Embed(
             title="👢 User Kicked",
-            description=f"**User:** {member.mention} ({member.id})\n**Reason:** {reason}\n**Moderator:** {ctx.author.mention}",
-            color=discord.Color.orange(),
-            timestamp=datetime.now(timezone.utc)
+            description=f"{member.mention} has been kicked.",
+            color=discord.Color.orange()
         )
+        embed.add_field(name="Reason", value=reason, inline=False)
+        embed.add_field(name="Moderator", value=ctx.author.mention, inline=True)
+        embed.timestamp = datetime.now(timezone.utc)
+
         await ctx.send(embed=embed)
+        logger.info(f"User {member} kicked by {ctx.author} for: {reason}")
 
     except discord.Forbidden:
-        await ctx.send("❌ I don't have permission to kick this user.")
+        embed = discord.Embed(
+            title="❌ Kick Failed",
+            description="I don't have permission to kick this user.",
+            color=discord.Color.red()
+        )
+        await ctx.send(embed=embed)
     except Exception as e:
-        await bot.report_error(ctx, traceback.format_exc())
+        await bot.report_error(ctx, f"Kick command error: {str(e)}")
 
 @bot.command()
-async def timeout(ctx, member: discord.Member, duration: str, *, reason="No reason provided"):
-    """Timeout a user with proper command structure"""
+async def timeout(ctx, member: discord.Member, duration: str, *, reason: str = "No reason provided"):
+    """Timeout a user for a specified duration"""
     if not bot.is_authorized(ctx, "timeout"):
-        return await ctx.send("❌ You don't have permission to timeout members.")
+        embed = discord.Embed(
+            title="❌ Access Denied",
+            description="You don't have permission to timeout members or you've been deopped.",
+            color=discord.Color.red()
+        )
+        await ctx.send(embed=embed)
+        return
+
+    if member == ctx.author:
+        embed = discord.Embed(
+            title="❌ Invalid Target",
+            description="You cannot timeout yourself!",
+            color=discord.Color.red()
+        )
+        await ctx.send(embed=embed)
+        return
+
+    if member.top_role >= ctx.author.top_role and not bot.is_admin(ctx.author):
+        embed = discord.Embed(
+            title="❌ Insufficient Hierarchy",
+            description="You cannot timeout someone with a higher or equal role!",
+            color=discord.Color.red()
+        )
+        await ctx.send(embed=embed)
+        return
+
+    # Parse duration
+    try:
+        duration_minutes = parse_duration(duration)
+        if duration_minutes > (28 * 24 * 60):  # 28 days max
+            embed = discord.Embed(
+                title="❌ Invalid Duration",
+                description="Maximum timeout duration is 28 days.",
+                color=discord.Color.red()
+            )
+            await ctx.send(embed=embed)
+            return
+    except ValueError as e:
+        embed = discord.Embed(
+            title="❌ Invalid Duration",
+            description=str(e),
+            color=discord.Color.red()
+        )
+        await ctx.send(embed=embed)
+        return
 
     try:
-        # Check bot permissions
-        perms = await bot.check_permissions(ctx.guild)
-        if not perms.get("moderate_members", False):
-            return await ctx.send("❌ I don't have permission to timeout members! Missing 'Timeout Members' permission.")
-
-        # Parse duration (e.g., "10m", "2h", "1d")
-        match = re.match(r"(\d+)([mhd])", duration.lower())
-        if not match:
-            return await ctx.send("❌ Invalid duration format! Use format like: 10m, 2h, 1d")
-
-        value = int(match.group(1))
-        unit = match.group(2)
-
-        if value <= 0:
-            return await ctx.send("⚠️ Timeout duration must be positive.")
-
-        now = datetime.now(timezone.utc)
-        if unit == "m":
-            until = now + timedelta(minutes=value)
-            duration_minutes = value
-        elif unit == "h":
-            until = now + timedelta(hours=value)
-            duration_minutes = value * 60
-        elif unit == "d":
-            if value > bot.config["max_timeout_days"]:
-                return await ctx.send(f"❌ Max timeout is {bot.config['max_timeout_days']} days.")
-            until = now + timedelta(days=value)
-            duration_minutes = value * 24 * 60
-
-        # Log action
+        # Calculate timeout end time
+        timeout_until = datetime.now(timezone.utc) + timedelta(minutes=duration_minutes)
+        
+        # Log the action
         action = ModerationAction(
             user_id=member.id,
             moderator_id=ctx.author.id,
             action=ActionType.TIMEOUT,
             reason=reason,
-            timestamp=now,
-            duration=duration_minutes
-        )
-        bot.log_action(action)
-
-        await member.timeout(until, reason=f"{reason} | Timed out by {ctx.author.name}")
-
-        embed = discord.Embed(
-            title="⏰ User Timed Out",
-            description=f"**User:** {member.mention}\n**Duration:** {value}{unit}\n**Until:** <t:{int(until.timestamp())}:F>\n**Reason:** {reason}\n**Moderator:** {ctx.author.mention}",
-            color=discord.Color.orange(),
-            timestamp=now
-        )
-        await ctx.send(embed=embed)
-
-    except discord.Forbidden:
-        await ctx.send("❌ I don't have permission to timeout this user. Check bot permissions!")
-    except Exception as e:
-        await ctx.send("❌ Failed to timeout user.")
-        await bot.report_error(ctx, traceback.format_exc())
-
-# Fixed timeout command using on_message event (legacy support)
-@bot.event
-async def on_message(message):
-    if message.author.bot:
-        return
-
-    # Handle timeout command with regex (legacy support)
-    raw = message.content.strip()
-    match = re.match(r"bottimeout\((\d+)([mhd])\)", raw)
-
-    if match:
-        ctx = await bot.get_context(message)
-        if not bot.is_authorized(ctx, "timeout"):
-            return await message.channel.send("❌ You don't have permission to timeout members.")
-
-        try:
-            # Check bot permissions first
-            perms = await bot.check_permissions(ctx.guild)
-            if not perms.get("moderate_members", False):
-                return await message.channel.send("❌ I don't have permission to timeout members! Missing 'Timeout Members' permission.")
-
-            value = int(match.group(1))
-            unit = match.group(2)
-
-            if value <= 0:
-                return await message.channel.send("⚠️ Timeout duration must be positive.")
-            if not message.mentions:
-                return await message.channel.send("❌ You must mention a user to timeout.")
-
-            member = message.mentions[0]
-
-            now = datetime.now(timezone.utc)
-            if unit == "m":
-                until = now + timedelta(minutes=value)
-                duration_minutes = value
-            elif unit == "h":
-                until = now + timedelta(hours=value)
-                duration_minutes = value * 60
-            elif unit == "d":
-                if value > bot.config["max_timeout_days"]:
-                    return await message.channel.send(f"❌ Max timeout is {bot.config['max_timeout_days']} days.")
-                until = now + timedelta(days=value)
-                duration_minutes = value * 24 * 60
-
-            # Log action
-            action = ModerationAction(
-                user_id=member.id,
-                moderator_id=message.author.id,
-                action=ActionType.TIMEOUT,
-                reason=f"Timed out for {value}{unit}",
-                timestamp=now,
-                duration=duration_minutes
-            )
-            bot.log_action(action)
-
-            await member.timeout(until, reason=f"Timed out by {message.author.name}")
-
-            embed = discord.Embed(
-                title="⏰ User Timed Out",
-                description=f"**User:** {member.mention}\n**Duration:** {value}{unit}\n**Until:** <t:{int(until.timestamp())}:F>\n**Moderator:** {message.author.mention}",
-                color=discord.Color.orange(),
-                timestamp=now
-            )
-            await message.channel.send(embed=embed)
-
-        except discord.Forbidden:
-            await message.channel.send("❌ I don't have permission to timeout this user. Check bot permissions!")
-        except Exception as e:
-            await message.channel.send("❌ Failed to timeout user.")
-            logger.error(f"Timeout error: {traceback.format_exc()}")
-
-    # Process other commands
-    await bot.process_commands(message)
-
-@bot.command()
-async def warn(ctx, member: discord.Member, *, reason="No reason provided"):
-    """Issue a warning to a user"""
-    if not bot.is_authorized(ctx, "warn"):
-        return await ctx.send("❌ You don't have permission to warn members.")
-
-    try:
-        # Add warning to memory
-        warning = bot.add_warning(member.id, ctx.author.id, reason)
-
-        # Log as moderation action
-        action = ModerationAction(
-            user_id=member.id,
-            moderator_id=ctx.author.id,
-            action=ActionType.WARN,
-            reason=reason,
+            duration=duration_minutes,
             timestamp=datetime.now(timezone.utc)
         )
         bot.log_action(action)
+
+        # Timeout the member
+        await member.timeout(timeout_until, reason=f"Timeout by {ctx.author}: {reason}")
+
+        embed = discord.Embed(
+            title="🤐 User Timed Out",
+            description=f"{member.mention} has been timed out for {duration}.",
+            color=discord.Color.orange()
+        )
+        embed.add_field(name="Duration", value=duration, inline=True)
+        embed.add_field(name="Reason", value=reason, inline=False)
+        embed.add_field(name="Moderator", value=ctx.author.mention, inline=True)
+        embed.timestamp = datetime.now(timezone.utc)
+
+        await ctx.send(embed=embed)
+        logger.info(f"User {member} timed out by {ctx.author} for {duration}: {reason}")
+
+    except discord.Forbidden:
+        embed = discord.Embed(
+            title="❌ Timeout Failed",
+            description="I don't have permission to timeout this user.",
+            color=discord.Color.red()
+        )
+        await ctx.send(embed=embed)
+    except Exception as e:
+        await bot.report_error(ctx, f"Timeout command error: {str(e)}")
+
+def parse_duration(duration_str: str) -> int:
+    """Parse duration string and return minutes"""
+    # Remove spaces and make lowercase
+    duration_str = duration_str.replace(" ", "").lower()
+    
+    # Extract number and unit
+    if duration_str[-1] == 'm':
+        return int(duration_str[:-1])
+    elif duration_str[-1] == 'h':
+        return int(duration_str[:-1]) * 60
+    elif duration_str[-1] == 'd':
+        return int(duration_str[:-1]) * 60 * 24
+    else:
+        raise ValueError("Duration must end with 'm' (minutes), 'h' (hours), or 'd' (days)")
+
+@bot.command()
+async def warn(ctx, member: discord.Member, *, reason: str = "No reason provided"):
+    """Warn a user"""
+    if not bot.is_authorized(ctx, "warn"):
+        embed = discord.Embed(
+            title="❌ Access Denied",
+            description="You don't have permission to warn members or you've been deopped.",
+            color=discord.Color.red()
+        )
+        await ctx.send(embed=embed)
+        return
+
+    if member == ctx.author:
+        embed = discord.Embed(
+            title="❌ Invalid Target",
+            description="You cannot warn yourself!",
+            color=discord.Color.red()
+        )
+        await ctx.send(embed=embed)
+        return
+
+    try:
+        # Add warning
+        warning = bot.add_warning(member.id, ctx.author.id, reason)
+        
+        # Get user's warning count
+        user_warnings = bot.get_user_warnings(member.id)
+        warning_count = len(user_warnings)
 
         embed = discord.Embed(
             title="⚠️ User Warned",
-            description=f"**User:** {member.mention}\n**Warning ID:** #{warning.id}\n**Reason:** {reason}\n**Moderator:** {ctx.author.mention}",
-            color=discord.Color.yellow(),
-            timestamp=datetime.now(timezone.utc)
+            description=f"{member.mention} has been warned.",
+            color=discord.Color.yellow()
         )
-        await ctx.send(embed=embed)
+        embed.add_field(name="Warning ID", value=f"#{warning.id}", inline=True)
+        embed.add_field(name="Total Warnings", value=warning_count, inline=True)
+        embed.add_field(name="Reason", value=reason, inline=False)
+        embed.add_field(name="Moderator", value=ctx.author.mention, inline=True)
+        embed.timestamp = datetime.now(timezone.utc)
 
-        # Send DM to user
-        try:
-            dm_embed = discord.Embed(
-                title="⚠️ Warning Received",
-                description=f"**Server:** {ctx.guild.name}\n**Warning ID:** #{warning.id}\n**Reason:** {reason}\n**Moderator:** {ctx.author.mention}",
-                color=discord.Color.yellow()
-            )
-            await member.send(embed=dm_embed)
-        except:
-            pass
+        await ctx.send(embed=embed)
+        logger.info(f"User {member} warned by {ctx.author}: {reason}")
 
     except Exception as e:
-        await bot.report_error(ctx, traceback.format_exc())
+        await bot.report_error(ctx, f"Warn command error: {str(e)}")
 
 @bot.command()
-async def warnings(ctx, member: discord.Member):
+async def warnings(ctx, member: discord.Member = None):
     """Show warnings for a user"""
-    warnings = bot.get_user_warnings(member.id, 10)
+    if member is None:
+        if isinstance(ctx.author, discord.Member):
+            member = ctx.author
+        else:
+            await ctx.send("This command can only be used in a server.")
+            return
 
-    if not warnings:
-        return await ctx.send(f"😇 {member.mention} has no warnings.")
-
+    user_warnings = bot.get_user_warnings(member.id)
+    
     embed = discord.Embed(
         title=f"⚠️ Warnings for {member.display_name}",
-        description=f"Total active warnings: {len(warnings)}",
         color=discord.Color.yellow()
     )
 
-    for warning in warnings[:5]:  # Show first 5
-        moderator = bot.get_user(warning.moderator_id)
-        mod_name = moderator.name if moderator else f"ID: {warning.moderator_id}"
-        embed.add_field(
-            name=f"Warning #{warning.id}",
-            value=f"**Reason:** {warning.reason}\n**By:** {mod_name}\n**Date:** {warning.timestamp.strftime('%Y-%m-%d %H:%M')}",
-            inline=False
-        )
-
-    if len(warnings) > 5:
-        embed.set_footer(text=f"Showing 5 of {len(warnings)} warnings")
+    if not user_warnings:
+        embed.description = "No warnings found."
+    else:
+        embed.description = f"Total active warnings: {len(user_warnings)}"
+        
+        for warning in user_warnings[:5]:  # Show last 5 warnings
+            moderator = ctx.guild.get_member(warning.moderator_id)
+            mod_name = moderator.display_name if moderator else "Unknown"
+            
+            embed.add_field(
+                name=f"Warning #{warning.id}",
+                value=f"**Reason:** {warning.reason}\n**Moderator:** {mod_name}\n**Date:** {warning.timestamp.strftime('%Y-%m-%d %H:%M UTC')}",
+                inline=False
+            )
 
     await ctx.send(embed=embed)
 
 @bot.command()
-async def history(ctx, member: discord.Member):
-    """Show moderation history for a user"""
-    actions = bot.get_user_actions(member.id, 10)
-
-    if not actions:
-        return await ctx.send(f"😇 {member.mention} has no moderation history.")
-
+async def stats(ctx):
+    """Show bot statistics"""
+    uptime = datetime.now(timezone.utc) - bot.stats["uptime_start"]
+    
     embed = discord.Embed(
-        title=f"📋 Moderation History for {member.display_name}",
-        description=f"Total actions: {len(actions)}",
+        title="📊 BanBot 3000 Statistics",
         color=discord.Color.blue()
     )
-
-    for action in actions[:5]:  # Show first 5
-        moderator = bot.get_user(action.moderator_id)
-        mod_name = moderator.name if moderator else f"ID: {action.moderator_id}"
-
-        duration_text = ""
-        if action.duration:
-            duration_text = f"\n**Duration:** {action.duration} minutes"
-
-        embed.add_field(
-            name=f"{action.action.value.title()} - {action.timestamp.strftime('%Y-%m-%d %H:%M')}",
-            value=f"**Reason:** {action.reason}\n**By:** {mod_name}{duration_text}",
-            inline=False
-        )
-
-    if len(actions) > 5:
-        embed.set_footer(text=f"Showing 5 of {len(actions)} actions")
+    
+    embed.add_field(name="Uptime", value=f"{uptime.days}d {uptime.seconds//3600}h {(uptime.seconds//60)%60}m", inline=True)
+    embed.add_field(name="Guilds", value=len(bot.guilds), inline=True)
+    embed.add_field(name="Commands Used", value=bot.stats["commands_used"], inline=True)
+    
+    embed.add_field(name="Bans", value=bot.stats["bans"], inline=True)
+    embed.add_field(name="Kicks", value=bot.stats["kicks"], inline=True)
+    embed.add_field(name="Timeouts", value=bot.stats["timeouts"], inline=True)
+    
+    embed.add_field(name="Warnings", value=bot.stats["warnings"], inline=True)
+    embed.add_field(name="Deops", value=bot.stats["deops"], inline=True)
+    embed.add_field(name="Total Actions", value=len(bot.moderation_actions), inline=True)
 
     await ctx.send(embed=embed)
 
 @bot.command()
-async def deop(ctx, user: discord.Member, *, reason="No reason provided"):
-    """Deop a user with reason (Admin only)"""
+async def deop(ctx, member: discord.Member, *, reason: str = "No reason provided"):
+    """Remove admin privileges from a user (Admin only)"""
     if not bot.is_admin(ctx.author):
-        return await ctx.send("🚫 Only admins can deop users.")
+        embed = discord.Embed(
+            title="❌ Access Denied",
+            description="Only administrators can use this command.",
+            color=discord.Color.red()
+        )
+        await ctx.send(embed=embed)
+        return
 
-    if bot.is_deopped(user.id):
-        return await ctx.send(f"⚠️ {user.mention} is already deopped.")
+    if member == ctx.author:
+        embed = discord.Embed(
+            title="❌ Invalid Target",
+            description="You cannot deop yourself!",
+            color=discord.Color.red()
+        )
+        await ctx.send(embed=embed)
+        return
 
     # Add to deopped users
-    deop_data = DeoppedUser(
-        user_id=user.id,
+    deopped_user = DeoppedUser(
+        user_id=member.id,
         deopped_by=ctx.author.id,
         timestamp=datetime.now(timezone.utc),
         reason=reason
     )
-    bot.deopped_users[user.id] = deop_data
+    bot.deopped_users[member.id] = deopped_user
     bot.stats["deops"] += 1
 
     embed = discord.Embed(
-        title="👎 User Deopped",
-        description=f"**User:** {user.mention}\n**Reason:** {reason}\n**By:** {ctx.author.mention}",
-        color=discord.Color.red(),
-        timestamp=datetime.now(timezone.utc)
+        title="🚫 User Deopped",
+        description=f"{member.mention} has been removed from admin privileges.",
+        color=discord.Color.red()
     )
+    embed.add_field(name="Reason", value=reason, inline=False)
+    embed.add_field(name="Admin", value=ctx.author.mention, inline=True)
+    embed.timestamp = datetime.now(timezone.utc)
+
     await ctx.send(embed=embed)
+    logger.info(f"User {member} deopped by {ctx.author}: {reason}")
 
 @bot.command()
-async def reop(ctx, user: discord.Member):
-    """Reop a user (Admin only)"""
+async def reop(ctx, member: discord.Member):
+    """Restore admin privileges to a user (Admin only)"""
     if not bot.is_admin(ctx.author):
-        return await ctx.send("🚫 Only admins can reop users.")
+        embed = discord.Embed(
+            title="❌ Access Denied",
+            description="Only administrators can use this command.",
+            color=discord.Color.red()
+        )
+        await ctx.send(embed=embed)
+        return
 
-    if not bot.is_deopped(user.id):
-        return await ctx.send(f"🤷 {user.mention} wasn't deopped.")
+    if member.id not in bot.deopped_users:
+        embed = discord.Embed(
+            title="❌ User Not Deopped",
+            description=f"{member.mention} is not currently deopped.",
+            color=discord.Color.red()
+        )
+        await ctx.send(embed=embed)
+        return
 
     # Remove from deopped users
-    del bot.deopped_users[user.id]
+    del bot.deopped_users[member.id]
 
     embed = discord.Embed(
-        title="👍 User Reopped",
-        description=f"**User:** {user.mention} has been forgiven and reopped.\n**By:** {ctx.author.mention}",
-        color=discord.Color.green(),
-        timestamp=datetime.now(timezone.utc)
+        title="✅ User Reopped",
+        description=f"{member.mention} has had their admin privileges restored.",
+        color=discord.Color.green()
     )
-    await ctx.send(embed=embed)
+    embed.add_field(name="Admin", value=ctx.author.mention, inline=True)
+    embed.timestamp = datetime.now(timezone.utc)
 
-@bot.command(aliases=["deopped"])
-async def show_deopped(ctx):
-    """Show all deopped users"""
+    await ctx.send(embed=embed)
+    logger.info(f"User {member} reopped by {ctx.author}")
+
+@bot.command()
+async def deopped(ctx):
+    """Show currently deopped users"""
     if not bot.deopped_users:
-        return await ctx.send("😇 Nobody is deopped. Peace reigns.")
+        embed = discord.Embed(
+            title="🚫 Deopped Users",
+            description="No users are currently deopped.",
+            color=discord.Color.green()
+        )
+        await ctx.send(embed=embed)
+        return
 
     embed = discord.Embed(
         title="🚫 Deopped Users",
-        description=f"Total deopped users: {len(bot.deopped_users)}",
         color=discord.Color.red()
     )
 
-    count = 0
-    for user_id, deop_data in bot.deopped_users.items():
-        if count >= 10:  # Limit to 10
-            break
-
-        user = bot.get_user(user_id)
-        username = user.name if user else f"Unknown (ID: {user_id})"
+    for user_id, deopped_user in bot.deopped_users.items():
+        member = ctx.guild.get_member(user_id)
+        member_name = member.display_name if member else f"User ID: {user_id}"
+        
+        deopped_by = ctx.guild.get_member(deopped_user.deopped_by)
+        deopped_by_name = deopped_by.display_name if deopped_by else "Unknown"
+        
         embed.add_field(
-            name=username,
-            value=f"**Reason:** {deop_data.reason}\n**Date:** {deop_data.timestamp.strftime('%Y-%m-%d')}",
-            inline=True
+            name=member_name,
+            value=f"**Reason:** {deopped_user.reason}\n**Deopped by:** {deopped_by_name}\n**Date:** {deopped_user.timestamp.strftime('%Y-%m-%d %H:%M UTC')}",
+            inline=False
         )
-        count += 1
-
-    if len(bot.deopped_users) > 10:
-        embed.set_footer(text=f"Showing 10 of {len(bot.deopped_users)} deopped users")
 
     await ctx.send(embed=embed)
 
 @bot.command()
 async def cleanup(ctx, amount: int = 10):
-    """Clean up messages"""
+    """Delete messages from the channel"""
     if not bot.is_authorized(ctx, "cleanup"):
-        return await ctx.send("❌ You don't have permission to manage messages.")
+        embed = discord.Embed(
+            title="❌ Access Denied",
+            description="You don't have permission to manage messages or you've been deopped.",
+            color=discord.Color.red()
+        )
+        await ctx.send(embed=embed)
+        return
 
-    if amount > 100:
-        return await ctx.send("❌ Cannot delete more than 100 messages at once.")
+    if amount < 1 or amount > 100:
+        embed = discord.Embed(
+            title="❌ Invalid Amount",
+            description="Amount must be between 1 and 100.",
+            color=discord.Color.red()
+        )
+        await ctx.send(embed=embed)
+        return
 
     try:
-        # Check bot permissions
-        perms = await bot.check_permissions(ctx.guild)
-        if not perms.get("manage_messages", False):
-            return await ctx.send("❌ I don't have permission to manage messages!")
-
-        deleted = await ctx.channel.purge(limit=amount + 1)  # +1 for the command message
+        deleted = await ctx.channel.purge(limit=amount + 1)  # +1 to include the command message
+        
         embed = discord.Embed(
             title="🧹 Messages Cleaned",
             description=f"Deleted {len(deleted) - 1} messages.",
             color=discord.Color.green()
         )
+        
+        # Send and auto-delete the confirmation
         msg = await ctx.send(embed=embed)
-        await asyncio.sleep(3)
+        await asyncio.sleep(5)
         await msg.delete()
+
     except discord.Forbidden:
-        await ctx.send("❌ I don't have permission to delete messages.")
+        embed = discord.Embed(
+            title="❌ Cleanup Failed",
+            description="I don't have permission to delete messages.",
+            color=discord.Color.red()
+        )
+        await ctx.send(embed=embed)
     except Exception as e:
-        await bot.report_error(ctx, traceback.format_exc())
+        await bot.report_error(ctx, f"Cleanup command error: {str(e)}")
 
 @bot.command()
-async def clear_memory(ctx):
-    """Clear all stored data (Admin only)"""
-    if not bot.is_admin(ctx.author):
-        return await ctx.send("❌ Only admins can clear memory.")
-
-    # Clear all data
-    bot.moderation_actions.clear()
-    bot.warnings.clear()
-    bot.deopped_users.clear()
-    bot.processed_messages.clear()
-    bot.user_message_times.clear()
-
-    # Reset counters
-    bot.next_warning_id = 1
-    bot.next_action_id = 1
-
-    # Reset stats (keep uptime_start)
-    uptime_start = bot.stats["uptime_start"]
-    bot.stats = {
-        "bans": 0,
-        "kicks": 0,
-        "timeouts": 0,
-        "warnings": 0,
-        "deops": 0,
-        "commands_used": 0,
-        "uptime_start": uptime_start
-    }
-
+async def uptime(ctx):
+    """Show bot uptime"""
+    uptime = datetime.now(timezone.utc) - bot.stats["uptime_start"]
+    
     embed = discord.Embed(
-        title="🧠 Memory Cleared",
-        description="All stored data has been cleared from memory.",
-        color=discord.Color.green()
+        title="⏰ Bot Uptime",
+        description=f"BanBot 3000 has been running for:\n{uptime.days} days, {uptime.seconds//3600} hours, {(uptime.seconds//60)%60} minutes",
+        color=discord.Color.blue()
     )
+    embed.timestamp = datetime.now(timezone.utc)
+    
     await ctx.send(embed=embed)
 
-# --- EVENT HANDLERS ---
-
-@bot.event
-async def on_ready():
-    logger.info(f"✅ BanBot 3000 (RAM Edition) is online as {bot.user}")
-    logger.info(f"Connected to {len(bot.guilds)} servers")
-
-    # Check permissions on startup
-    for guild in bot.guilds:
-        perms = await bot.check_permissions(guild)
-        missing_perms = [perm for perm, has_perm in perms.items() if not has_perm and perm in ["ban_members", "kick_members", "moderate_members"]]
-        if missing_perms:
-            logger.warning(f"Missing critical permissions in {guild.name}: {', '.join(missing_perms)}")
-
-    # Start cleanup task after bot is ready
-    if not bot.cleanup_task.is_running():
-        bot.cleanup_task.start()
-
-    # Set status
-    activity = discord.Activity(type=discord.ActivityType.watching, name="bothelp")
-    await bot.change_presence(status=discord.Status.online, activity=activity)
-
-@bot.event
-async def on_command_error(ctx, error):
-    """Handle command errors gracefully"""
-    if isinstance(error, commands.CommandNotFound):
-        # Ignore command not found errors to reduce spam
-        return
-    elif isinstance(error, commands.MissingRequiredArgument):
-        await ctx.send(f"❌ Missing required argument: {error.param.name}")
-    elif isinstance(error, commands.BadArgument):
-        await ctx.send(f"❌ Invalid argument: {error}")
-    elif isinstance(error, commands.MemberNotFound):
-        await ctx.send("❌ Member not found. Please mention a valid member.")
-    elif isinstance(error, discord.Forbidden):
-        await ctx.send("❌ I don't have permission to perform this action.")
-    else:
-        # Log unexpected errors
-        logger.error(f"Unexpected error in command {ctx.command}: {error}")
-        await bot.report_error(ctx, traceback.format_exc())
-        await ctx.send("❌ An unexpected error occurred.")
-
 def run_bot():
-    """Run the Discord bot with error handling and auto-restart."""
-    max_retries = 5
-    retry_count = 0
+    """Run the Discord bot"""
+    token = os.getenv('DISCORD_TOKEN')
+    if not token:
+        logger.error("No Discord token provided! Set the DISCORD_TOKEN environment variable.")
+        return
     
-    # Get Discord token from environment
-    discord_token = os.getenv('DISCORD_TOKEN', 'your_discord_token_here')
-    
-    while retry_count < max_retries:
-        try:
-            logger.info(f"Starting BanBot 3000 (attempt {retry_count + 1}/{max_retries})")
-            
-            if not discord_token or discord_token == 'your_discord_token_here':
-                logger.error("DISCORD_TOKEN not found in environment variables!")
-                logger.error("Please set your Discord bot token in the Replit secrets tab.")
-                break
-            
-            bot.run(discord_token, log_handler=None)
-            
-        except discord.LoginFailure:
-            logger.error("Invalid Discord token! Please check your DISCORD_TOKEN environment variable.")
-            break
-            
-        except discord.ConnectionClosed:
-            logger.warning("Connection closed by Discord. Attempting to reconnect...")
-            retry_count += 1
-            if retry_count < max_retries:
-                logger.info(f"Retrying in 10 seconds... ({retry_count}/{max_retries})")
-                time.sleep(10)
-            
-        except Exception as e:
-            logger.error(f"Unexpected error: {e}")
-            retry_count += 1
-            if retry_count < max_retries:
-                logger.info(f"Retrying in 30 seconds... ({retry_count}/{max_retries})")
-                time.sleep(30)
-    
-    logger.error("Max retries reached. Bot shutting down.")
+    try:
+        bot.run(token)
+    except discord.LoginFailure:
+        logger.error("Invalid Discord token provided!")
+    except Exception as e:
+        logger.error(f"Bot error: {e}")
+        raise
