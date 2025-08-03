@@ -87,6 +87,7 @@ class BanBot3000(commands.Bot):
         self.deopped_users: Dict[int, DeoppedUser] = {}
         self.warnings: List[Warning] = []
         self.processed_messages: deque = deque(maxlen=1000)
+        self.command_history: List[Dict] = []  # Command history tracking
 
         # Auto-incrementing IDs
         self.next_warning_id = 1
@@ -105,6 +106,34 @@ class BanBot3000(commands.Bot):
 
         # Spam detection
         self.user_message_times: Dict[int, deque] = defaultdict(lambda: deque(maxlen=10))
+
+    def log_command_usage(self, ctx, command_name: str, target_user: Optional[discord.Member] = None, details: str = None):
+        """Log command usage to history"""
+        entry = {
+            "timestamp": datetime.now(timezone.utc),
+            "command": command_name,
+            "executor": {
+                "id": ctx.author.id,
+                "name": ctx.author.display_name
+            },
+            "channel": ctx.channel.name,
+            "guild": ctx.guild.name if ctx.guild else "DM"
+        }
+        
+        if target_user:
+            entry["affected"] = {
+                "id": target_user.id,
+                "name": target_user.display_name
+            }
+        
+        if details:
+            entry["details"] = details
+            
+        self.command_history.append(entry)
+        
+        # Keep only last 1000 command entries to prevent memory issues
+        if len(self.command_history) > 1000:
+            self.command_history = self.command_history[-500:]
 
     def is_admin(self, user: Union[discord.Member, discord.User]) -> bool:
         """Check if user is admin"""
@@ -333,6 +362,8 @@ bot = BanBot3000()
 @bot.command(name="help", aliases=["h"])
 async def help_command(ctx):
     """Display help information"""
+    bot.log_command_usage(ctx, "help")
+    
     embed = discord.Embed(
         title="🤖 BanBot 3000 Commands",
         description="Advanced Discord Moderation Bot (RAM Edition)",
@@ -358,7 +389,7 @@ async def help_command(ctx):
         value="""
 `botstats` - Show bot statistics
 `botwarnings @user` - Show user warnings
-`bothistory @user` - Show moderation history
+`bothistory [@user]` - Show command history
 `botdeopped` - Show deopped users
 `botmemory` - Show memory usage stats
 `botperms` - Check bot permissions
@@ -369,7 +400,7 @@ async def help_command(ctx):
 
     embed.add_field(
         name="🔧 Utility",
-        value="`botping` - Test bot response\n`botcleanup [amount]` - Clean messages (Requires Manage Messages)\n`botuptime` - Show bot uptime",
+        value="`botping` - Test bot response\n`botcleanup [amount]` - Clean messages (Requires Manage Messages)\n`botbotcleanup` - Clean bot memory (Admin only)\n`botuptime` - Show bot uptime",
         inline=False
     )
 
@@ -378,6 +409,8 @@ async def help_command(ctx):
 @bot.command()
 async def ping(ctx):
     """Test bot responsiveness"""
+    bot.log_command_usage(ctx, "ping")
+    
     latency = round(bot.latency * 1000)
     embed = discord.Embed(
         title="🏓 Pong!",
@@ -389,6 +422,8 @@ async def ping(ctx):
 @bot.command()
 async def perms(ctx):
     """Check bot permissions"""
+    bot.log_command_usage(ctx, "perms")
+    
     perms = await bot.check_permissions(ctx.guild)
     embed = discord.Embed(
         title="🔐 Bot Permissions",
@@ -415,6 +450,8 @@ async def perms(ctx):
 @bot.command()
 async def userperms(ctx, member: discord.Member = None):
     """Check user permissions for moderation commands"""
+    bot.log_command_usage(ctx, "userperms", member)
+    
     if member is None:
         if isinstance(ctx.author, discord.Member):
             member = ctx.author
@@ -466,6 +503,8 @@ async def userperms(ctx, member: discord.Member = None):
 @bot.command()
 async def ban(ctx, member: discord.Member, *, reason: str = "No reason provided"):
     """Ban a user from the server"""
+    bot.log_command_usage(ctx, "ban", member, reason)
+    
     if not bot.is_authorized(ctx, "ban"):
         embed = discord.Embed(
             title="❌ Access Denied",
@@ -532,6 +571,8 @@ async def ban(ctx, member: discord.Member, *, reason: str = "No reason provided"
 @bot.command()
 async def kick(ctx, member: discord.Member, *, reason: str = "No reason provided"):
     """Kick a user from the server"""
+    bot.log_command_usage(ctx, "kick", member, reason)
+    
     if not bot.is_authorized(ctx, "kick"):
         embed = discord.Embed(
             title="❌ Access Denied",
@@ -598,6 +639,8 @@ async def kick(ctx, member: discord.Member, *, reason: str = "No reason provided
 @bot.command()
 async def timeout(ctx, member: discord.Member, duration: str, *, reason: str = "No reason provided"):
     """Timeout a user for a specified duration"""
+    bot.log_command_usage(ctx, "timeout", member, f"{duration} - {reason}")
+    
     if not bot.is_authorized(ctx, "timeout"):
         embed = discord.Embed(
             title="❌ Access Denied",
@@ -704,6 +747,8 @@ def parse_duration(duration_str: str) -> int:
 @bot.command()
 async def warn(ctx, member: discord.Member, *, reason: str = "No reason provided"):
     """Warn a user"""
+    bot.log_command_usage(ctx, "warn", member, reason)
+    
     if not bot.is_authorized(ctx, "warn"):
         embed = discord.Embed(
             title="❌ Access Denied",
@@ -750,6 +795,8 @@ async def warn(ctx, member: discord.Member, *, reason: str = "No reason provided
 @bot.command()
 async def warnings(ctx, member: discord.Member = None):
     """Show warnings for a user"""
+    bot.log_command_usage(ctx, "warnings", member)
+    
     if member is None:
         if isinstance(ctx.author, discord.Member):
             member = ctx.author
@@ -782,8 +829,235 @@ async def warnings(ctx, member: discord.Member = None):
     await ctx.send(embed=embed)
 
 @bot.command()
+async def history(ctx, member: discord.Member = None, limit: int = 10):
+    """Shows the bot command history"""
+    bot.log_command_usage(ctx, "history", member)
+    
+    if not bot.is_authorized(ctx, "warn"):  # Using warn permission level for viewing history
+        embed = discord.Embed(
+            title="❌ Access Denied",
+            description="You don't have permission to view command history.",
+            color=discord.Color.red()
+        )
+        await ctx.send(embed=embed)
+        return
+    
+    if limit < 1 or limit > 50:
+        limit = 10
+    
+    # Filter history by member if specified
+    if member:
+        filtered_history = [
+            entry for entry in bot.command_history 
+            if (entry["executor"]["id"] == member.id or 
+                (entry.get("affected") and entry["affected"]["id"] == member.id))
+        ]
+        title = f"🤖 Command History for {member.display_name}"
+    else:
+        filtered_history = bot.command_history
+        title = "🤖 Bot Command History"
+    
+    if not filtered_history:
+        embed = discord.Embed(
+            title=title,
+            description="No command history found.",
+            color=discord.Color.blue()
+        )
+        await ctx.send(embed=embed)
+        return
+    
+    # Get the last 'limit' entries
+    recent_history = filtered_history[-limit:]
+    
+    embed = discord.Embed(
+        title=title,
+        description=f"Showing last {len(recent_history)} commands",
+        color=discord.Color.blue()
+    )
+    
+    for i, entry in enumerate(reversed(recent_history), 1):
+        timestamp = entry["timestamp"].strftime("%Y-%m-%d %H:%M:%S UTC")
+        executor = entry["executor"]["name"]
+        command = entry["command"]
+        
+        field_value = f"**Executor:** {executor}\n**Time:** {timestamp}\n**Channel:** {entry['channel']}"
+        
+        if entry.get("affected"):
+            field_value += f"\n**Affected:** {entry['affected']['name']}"
+        
+        if entry.get("details"):
+            field_value += f"\n**Details:** {entry['details']}"
+        
+        embed.add_field(
+            name=f"{i}. bot{command}",
+            value=field_value,
+            inline=False
+        )
+    
+    await ctx.send(embed=embed)
+
+@bot.command()
+async def botcleanup(ctx):
+    """Cleans the bot's memory/history"""
+    bot.log_command_usage(ctx, "botcleanup")
+    
+    if not bot.is_admin(ctx.author):
+        embed = discord.Embed(
+            title="❌ Access Denied",
+            description="Only administrators can clean bot memory.",
+            color=discord.Color.red()
+        )
+        await ctx.send(embed=embed)
+        return
+    
+    # Confirmation embed
+    embed = discord.Embed(
+        title="⚠️ Bot Memory Cleanup",
+        description="This will clear all bot history and reset statistics. This action cannot be undone!\n\nReact with ✅ to confirm or ❌ to cancel.",
+        color=discord.Color.orange()
+    )
+    
+    # Add current memory stats
+    memory_info = f"""
+**Current Memory Usage:**
+• Command History: {len(bot.command_history)} entries
+• Moderation Actions: {len(bot.moderation_actions)} entries
+• Warnings: {len(bot.warnings)} entries
+• Deopped Users: {len(bot.deopped_users)} users
+• Message Tracking: {len(bot.user_message_times)} users
+    """
+    embed.add_field(name="Memory Stats", value=memory_info, inline=False)
+    
+    # Add reaction-based confirmation
+    message = await ctx.send(embed=embed)
+    await message.add_reaction("✅")
+    await message.add_reaction("❌")
+    
+    def check(reaction, user):
+        return user == ctx.author and str(reaction.emoji) in ["✅", "❌"] and reaction.message.id == message.id
+    
+    try:
+        reaction, user = await bot.wait_for("reaction_add", timeout=30.0, check=check)
+        
+        if str(reaction.emoji) == "✅":
+            # Clear all memory
+            bot.command_history.clear()
+            bot.moderation_actions.clear()
+            bot.warnings.clear()
+            bot.deopped_users.clear()
+            bot.user_message_times.clear()
+            bot.processed_messages.clear()
+            
+            # Reset stats (keep uptime)
+            uptime_start = bot.stats["uptime_start"]
+            bot.stats = {
+                "bans": 0,
+                "kicks": 0,
+                "timeouts": 0,
+                "warnings": 0,
+                "deops": 0,
+                "commands_used": 0,
+                "uptime_start": uptime_start
+            }
+            
+            # Reset ID counters
+            bot.next_warning_id = 1
+            bot.next_action_id = 1
+            
+            success_embed = discord.Embed(
+                title="✅ Cleanup Complete",
+                description="Bot memory has been successfully cleared!\n\n**Cleared:**\n• All command history\n• All moderation actions\n• All warnings\n• All deopped users\n• Message tracking data\n• Statistics (except uptime)",
+                color=discord.Color.green()
+            )
+            await message.edit(embed=success_embed)
+            await message.clear_reactions()
+            
+            logger.info(f"Bot memory cleaned by {ctx.author}")
+            
+        else:
+            cancel_embed = discord.Embed(
+                title="❌ Cleanup Cancelled",
+                description="Bot memory cleanup has been cancelled.",
+                color=discord.Color.grey()
+            )
+            await message.edit(embed=cancel_embed)
+            await message.clear_reactions()
+            
+    except asyncio.TimeoutError:
+        timeout_embed = discord.Embed(
+            title="⏰ Cleanup Timeout",
+            description="Cleanup confirmation timed out. No changes were made.",
+            color=discord.Color.grey()
+        )
+        await message.edit(embed=timeout_embed)
+        await message.clear_reactions()
+
+@bot.command()
+async def memory(ctx):
+    """Show detailed memory usage statistics"""
+    bot.log_command_usage(ctx, "memory")
+    
+    embed = discord.Embed(
+        title="🧠 Bot Memory Usage",
+        description="Current in-memory data storage statistics",
+        color=discord.Color.blue()
+    )
+    
+    # Memory usage breakdown
+    embed.add_field(
+        name="📝 Command History",
+        value=f"{len(bot.command_history)} entries",
+        inline=True
+    )
+    
+    embed.add_field(
+        name="⚖️ Moderation Actions",
+        value=f"{len(bot.moderation_actions)} actions",
+        inline=True
+    )
+    
+    embed.add_field(
+        name="⚠️ Warnings",
+        value=f"{len(bot.warnings)} warnings",
+        inline=True
+    )
+    
+    embed.add_field(
+        name="🚫 Deopped Users",
+        value=f"{len(bot.deopped_users)} users",
+        inline=True
+    )
+    
+    embed.add_field(
+        name="📊 Message Tracking",
+        value=f"{len(bot.user_message_times)} users",
+        inline=True
+    )
+    
+    embed.add_field(
+        name="💾 Processed Messages",
+        value=f"{len(bot.processed_messages)} messages",
+        inline=True
+    )
+    
+    # Calculate approximate memory usage
+    total_entries = (len(bot.command_history) + len(bot.moderation_actions) + 
+                    len(bot.warnings) + len(bot.deopped_users) + 
+                    len(bot.user_message_times) + len(bot.processed_messages))
+    
+    embed.add_field(
+        name="📈 Total Entries",
+        value=f"{total_entries:,} items",
+        inline=False
+    )
+    
+    await ctx.send(embed=embed)
+
+@bot.command()
 async def stats(ctx):
     """Show bot statistics"""
+    bot.log_command_usage(ctx, "stats")
+    
     uptime = datetime.now(timezone.utc) - bot.stats["uptime_start"]
     
     embed = discord.Embed(
@@ -808,6 +1082,8 @@ async def stats(ctx):
 @bot.command()
 async def deop(ctx, member: discord.Member, *, reason: str = "No reason provided"):
     """Remove admin privileges from a user (Admin only)"""
+    bot.log_command_usage(ctx, "deop", member, reason)
+    
     if not bot.is_admin(ctx.author):
         embed = discord.Embed(
             title="❌ Access Denied",
@@ -851,6 +1127,8 @@ async def deop(ctx, member: discord.Member, *, reason: str = "No reason provided
 @bot.command()
 async def reop(ctx, member: discord.Member):
     """Restore admin privileges to a user (Admin only)"""
+    bot.log_command_usage(ctx, "reop", member)
+    
     if not bot.is_admin(ctx.author):
         embed = discord.Embed(
             title="❌ Access Denied",
@@ -886,6 +1164,8 @@ async def reop(ctx, member: discord.Member):
 @bot.command()
 async def deopped(ctx):
     """Show currently deopped users"""
+    bot.log_command_usage(ctx, "deopped")
+    
     if not bot.deopped_users:
         embed = discord.Embed(
             title="🚫 Deopped Users",
@@ -918,6 +1198,8 @@ async def deopped(ctx):
 @bot.command()
 async def cleanup(ctx, amount: int = 10):
     """Delete messages from the channel"""
+    bot.log_command_usage(ctx, "cleanup", details=f"Amount: {amount}")
+    
     if not bot.is_authorized(ctx, "cleanup"):
         embed = discord.Embed(
             title="❌ Access Denied",
@@ -963,6 +1245,8 @@ async def cleanup(ctx, amount: int = 10):
 @bot.command()
 async def uptime(ctx):
     """Show bot uptime"""
+    bot.log_command_usage(ctx, "uptime")
+    
     uptime = datetime.now(timezone.utc) - bot.stats["uptime_start"]
     
     embed = discord.Embed(
